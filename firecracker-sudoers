@@ -1,0 +1,10 @@
+# Allow python-api user to manage network interfaces and iptables without password
+%firecracker ALL=(ALL) NOPASSWD: /sbin/ip link delete *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/ip tuntap add *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/ip addr add *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/ip link set *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/iptables -t nat -D POSTROUTING *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/iptables -t nat -A POSTROUTING *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/iptables -A FORWARD *
+%firecracker ALL=(ALL) NOPASSWD: /sbin/iptables -P FORWARD *
+%firecracker ALL=(ALL) NOPASSWD: /bin/sh -c echo 1 > /proc/sys/net/ipv4/ip_forward
