@@ -1,0 +1,14 @@
+services:
+  service-vm-host:
+    build: .
+    ports:
+      - 5003:5003
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    networks:
+      - iaas-firecracker-network
+
+networks:
+  iaas-firecracker-network:
