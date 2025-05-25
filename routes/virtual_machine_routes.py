@@ -1,154 +1,38 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel
-from typing import Optional, List, Dict
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+from models.model_virtual_machine import VirtualMachine, VirtualMachineCreate, VMStartConfig, VMStopConfig, VMDeleteConfig, VMStatusConfig, VMStatus
+from models.model_ssh_key import SSHKey
+from models.model_vm_offers import VMOfferEntity
+from models.model_system_images import SystemImageEntity
+from utils.utils_ssh import generate_ssh_key_pair, save_ssh_key_to_db
+from sqlalchemy.orm import Session
+from database import SessionLocal
 import subprocess
 import json
-import os
 import time
-import logging
-from datetime import datetime
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
 import os
+from typing import Dict
+from logging import getLogger
+from utils.utils_ssh import generate_ssh_key_pair, save_ssh_key_to_db
+from utils.utils_mac_adress import generate_ip_from_sequence, generate_tap_ip_from_sequence, generate_mac_address
 from dotenv import load_dotenv
+from dependencies import StandardResponse
+import platform
+import psutil
+import uuid
+import requests
 
-# Importer les modèles depuis models.py
-from models import VirtualMachine
-from utils_ssh import generate_ssh_key_pair, save_ssh_key_to_db
-from utils_mac_adress import generate_ip_from_sequence, generate_tap_ip_from_sequence, generate_mac_address
-from RabbitMQ.consumer_vm_offer import rabbitmq_consumer
-from RabbitMQ.cosumer_system_image import system_image_consumer
 
-# Charger les variables d'environnement
+logger = getLogger(__name__)
+
+
+router = APIRouter(
+    prefix="/api/service-vm-host",
+    tags=["vm-host"],
+    responses={404: {"description": "Not found"}},
+)
+
+# Charger les variables d'environnement avant d'importer les autres modules
 load_dotenv()
-
-# Configuration de la base de données
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
-MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_DATABASE = os.getenv("MYSQL_DB", "service_vm_host_db")
-
-DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
-
-# Configuration SQLAlchemy
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Modèle Pydantic pour la validation des données
-class MetricsUpdate(BaseModel):
-    user_id: int
-    vm_id: int
-    cpu_usage: float
-    memory_usage: float
-    disk_usage: float
-
-# Dépendance pour obtenir la session de base de données
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Configure logging
-log_dir = "logs"
-os.makedirs(log_dir, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'firecracker.log')),
-        logging.StreamHandler()  # Pour afficher aussi dans la console
-    ]
-)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(
-    title="Firecracker VM Manager API",
-    description="API pour gérer les machines virtuelles avec Firecracker",
-    version="1.0.0",
-    docs_url="/swagger"
-)
-
-# Connect to RabbitMQ and start consuming on startup
-@app.on_event("startup")
-async def startup_event():
-    # Start the RabbitMQ consumers in background threads
-    rabbitmq_consumer.start_consuming()
-    logger.info("Started RabbitMQ consumer for VM offer events")
-    
-    system_image_consumer.start_consuming()
-    logger.info("Started RabbitMQ consumer for System Image events")
-
-# Stop RabbitMQ consumers on shutdown
-@app.on_event("shutdown")
-async def shutdown_event():
-    rabbitmq_consumer.stop_consuming()
-    logger.info("Stopped VM offer RabbitMQ consumer")
-    
-    system_image_consumer.stop_consuming()
-    logger.info("Stopped System Image RabbitMQ consumer")
-
-@app.get("/health", tags=["health"])
-async def health_check():
-    """Vérifie la santé de l'application"""
-    return {"status": "UP", "service": "SERVICE-VM-HOST"}
-
-class VMConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    service_cluster_id: int
-    cpu_count: int
-    memory_size_mib: int
-    disk_size_gb: int
-    os_type: str  # 'ubuntu-24.04', 'ubuntu-22.04', 'alpine', 'centos'
-    ssh_public_key: Optional[str] = None  # Clé SSH publique de l'utilisateur
-    root_password: Optional[str] = None
-    tap_device: Optional[str] = "tap0"
-    tap_ip: Optional[str] = "172.16.0.1"
-    vm_ip: Optional[str] = "172.16.0.2"
-    vm_mac: Optional[str] = "00:00:00:00:00:00"
-    vm_offer_id: int
-    system_image_id: int
-
-class VMStartConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    cpu_count: int
-    os_type: str
-    memory_size_mib: int
-    disk_size_gb: int
-    vm_mac: str
-    tap_device: Optional[str] = "tap0"
-    tap_ip: Optional[str] = "172.16.0.1"
-    vm_ip: Optional[str] = "172.16.0.2"
-
-class VMStopConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    tap_device: Optional[str] = "tap0"
-
-class VMDeleteConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    tap_device: Optional[str] = "tap0"
-
-class VMStatusConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-
-class VMStatus(BaseModel):
-    name: str
-    status: str
-    cpu_usage: Optional[float] = None
-    memory_usage: Optional[float] = None
-    uptime: Optional[str] = None
-
-class CommandResponse(BaseModel):
-    success: bool
-    message: str
-    data: Optional[dict] = None
 
 class FirecrackerAPI:
     def __init__(self, socket_path: str):
@@ -294,12 +178,112 @@ def start_firecracker_process(user_id: str, vm_name: str, socket_path: str) -> N
     logger.info("Socket is available, waiting for API")
     time.sleep(2)  # Attendre que l'API soit prête
 
-@app.get("/")
+
+
+# Fonction pour obtenir les informations système
+def get_system_info():
+    try:
+        # Obtenir l'adresse MAC
+        mac_address = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff) 
+                               for elements in range(0, 48, 8)][::-1])
+        
+        # Obtenir l'adresse IP
+        hostname = platform.node()
+        ip_address = "127.0.0.1"  # Par défaut
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip_address = s.getsockname()[0]
+            s.close()
+        except:
+            logger.warning("Impossible de déterminer l'adresse IP, utilisation de 127.0.0.1")
+        
+        # Obtenir les informations sur le processeur
+        processor = platform.processor() or "Unknown"
+        if not processor or processor == "":
+            processor = platform.machine()
+        
+        # Obtenir le nombre de cœurs
+        num_cores = psutil.cpu_count(logical=False)
+        if not num_cores:
+            num_cores = psutil.cpu_count(logical=True)
+        
+        # Obtenir les informations sur la RAM
+        ram_info = psutil.virtual_memory()
+        ram_total_gb = round(ram_info.total / (1024**3))
+        ram_available_gb = round(ram_info.available / (1024**3))
+        
+        # Obtenir les informations sur le disque
+        disk_info = psutil.disk_usage('/')
+        disk_total_gb = round(disk_info.total / (1024**3))
+        disk_available_gb = round(disk_info.free / (1024**3))
+        
+        # Obtenir l'utilisation du CPU
+        cpu_usage = psutil.cpu_percent(interval=1)
+        available_processor = 100 - cpu_usage
+        
+        return {
+            "nom": hostname,
+            "adresse_mac": mac_address,
+            "ip": ip_address,
+            "rom": disk_total_gb,
+            "available_rom": disk_available_gb,
+            "ram": ram_total_gb,
+            "available_ram": ram_available_gb,
+            "processeur": processor,
+            "available_processor": available_processor,
+            "number_of_core": num_cores
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des informations système: {e}")
+        return None
+
+# Fonction pour enregistrer le service auprès du service-cluster
+def register_with_service_cluster():
+    try:
+        # Récupérer l'URL du service-cluster depuis les variables d'environnement
+        service_cluster_host = os.getenv('SERVICE_CLUSTER_HOST')
+        if not service_cluster_host:
+            logger.error("La variable d'environnement SERVICE_CLUSTER_HOST n'est pas définie")
+            return False
+        
+        # Construire l'URL complète
+        register_url = f"{service_cluster_host}/api/service-clusters/"
+        
+        # Obtenir les informations système
+        system_info = get_system_info()
+        if not system_info:
+            logger.error("Impossible d'obtenir les informations système")
+            return False
+        
+        # Envoyer la requête POST au service-cluster
+        logger.info(f"Tentative d'enregistrement auprès de {register_url} avec les données: {json.dumps(system_info)}")
+        response = requests.post(
+            register_url,
+            json=system_info,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # Vérifier la réponse
+        if response.status_code in [200, 201]:
+            logger.info(f"Enregistrement réussi auprès du service-cluster: {response.json()}")
+            return True
+        else:
+            logger.error(f"Erreur lors de l'enregistrement auprès du service-cluster: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de l'enregistrement auprès du service-cluster: {e}")
+        return False
+
+
+@router.get("/")
 async def read_root():
     return {"message": "Firecracker VM Manager API"}
 
-@app.post("/vm/create", response_model=CommandResponse)
-async def create_vm(vm_config: VMConfig, background_tasks: BackgroundTasks):
+@router.post("/vm/create", response_model=StandardResponse)
+async def create_vm(vm_config: VirtualMachineCreate, background_tasks: BackgroundTasks):
     try:
         # Générer une paire de clés SSH
         ssh_key_pair = generate_ssh_key_pair()
@@ -480,7 +464,7 @@ async def create_vm(vm_config: VMConfig, background_tasks: BackgroundTasks):
                 vm.tap_ip = vm_config.tap_ip
                 vm.mac_address = vm_config.vm_mac
                 vm.status = "created"
-                vm.os_type = vm_config.os_type
+                #vm.os_type = vm_config.os_type
                 
                 # Enregistrer les modifications
                 db.commit()
@@ -495,8 +479,8 @@ async def create_vm(vm_config: VMConfig, background_tasks: BackgroundTasks):
             db.close()
             
         logger.info(f"VM {vm_config.name} created successfully")
-        return CommandResponse(
-            success=True,
+        return StandardResponse(
+            statusCode=200,
             message=f"VM {vm_config.name} created successfully",
             data={
                 "pid": 0,
@@ -507,9 +491,15 @@ async def create_vm(vm_config: VMConfig, background_tasks: BackgroundTasks):
 
     except Exception as e:
         logger.error(f"Error creating VM: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error creating VM: {str(e)}",
+            data={}
+        )
 
-@app.post("/vm/start", response_model=CommandResponse)
+
+
+@router.post("/vm/start", response_model=StandardResponse)
 async def start_vm(vm_start_config: VMStartConfig):
     """
     Démarre une VM existante.
@@ -518,7 +508,11 @@ async def start_vm(vm_start_config: VMStartConfig):
         # Vérifier si la VM existe
         vm_dir = os.path.join("/opt/firecracker/vm", vm_start_config.user_id, str(vm_start_config.name))
         if not os.path.exists(vm_dir):
-            raise HTTPException(status_code=404, detail="VM not found")
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
 
         # Déterminer le type d'OS
         os_type = None
@@ -528,7 +522,11 @@ async def start_vm(vm_start_config: VMStartConfig):
                 break
 
         if os_type is None:
-            raise HTTPException(status_code=404, detail="OS type not found")
+            return StandardResponse(
+            statusCode=404,
+            message="OS type not found",
+            data={}
+        )
 
         # Définir le chemin du socket unique pour cette VM
         socket_dir = "/tmp/firecracker-sockets"
@@ -565,20 +563,37 @@ async def start_vm(vm_start_config: VMStartConfig):
 
         if start_result.returncode != 0:
             logger.error(f"Failed to start VM: {start_result.stderr}")
-            raise HTTPException(status_code=500, detail=f"Failed to start VM: {start_result.stderr}")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to start VM: {start_result.stderr}",
+            data={}
+        )
 
-        return CommandResponse(
-            success=True,
-            message=f"VM {vm_start_config.name} started successfully"
+        return StandardResponse(
+            statusCode=200,
+            message=f"VM {vm_start_config.name} started successfully",
+            data={
+                # "pid": 0,
+                # "ssh_key_id": ssh_key_id,
+                # "private_key": ssh_key_pair['private_key']
+            }
         )
 
     except HTTPException as he:
-        raise he
+        return StandardResponse(
+            statusCode=he.status_code,
+            message=he.detail,
+            data={}
+        )
     except Exception as e:
         logger.error(f"Error starting VM: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error starting VM: {str(e)}",
+            data={}
+        )
 
-@app.post("/vm/stop", response_model=CommandResponse)
+@router.post("/vm/stop", response_model=StandardResponse)
 async def stop_vm(vm_stop_config: VMStopConfig):
     try:
         logger.info(f"Stopping VM: {vm_stop_config.name}")
@@ -592,19 +607,28 @@ async def stop_vm(vm_stop_config: VMStopConfig):
         
         if stop_result.returncode != 0:
             logger.error(f"Failed to stop VM: {stop_result.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to stop VM")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to stop VM: {stop_result.stderr}",
+            data={}
+        )
 
         logger.info(f"VM {vm_stop_config.name} stopped successfully")
-        return CommandResponse(
-            success=True,
-            message=f"VM {vm_stop_config.name} stopped successfully"
+        return StandardResponse(
+            statusCode=200,
+            message=f"VM {vm_stop_config.name} stopped successfully",
+            data={}
         )
 
     except Exception as e:
         logger.error(f"Error stopping VM: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error stopping VM: {str(e)}",
+            data={}
+        )
 
-@app.post("/vm/delete", response_model=CommandResponse)
+@router.post("/vm/delete", response_model=StandardResponse)
 async def delete_vm(vm_delete_config: VMDeleteConfig):
     try:
         logger.info(f"Deleting VM: {vm_delete_config.name}")
@@ -618,19 +642,28 @@ async def delete_vm(vm_delete_config: VMDeleteConfig):
         
         if delete_result.returncode != 0:
             logger.error(f"Failed to delete VM: {delete_result.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to delete VM")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to delete VM: {delete_result.stderr}",
+            data={}
+        )
 
         logger.info(f"VM {vm_delete_config.name} deleted successfully")
-        return CommandResponse(
-            success=True,
-            message=f"VM {vm_delete_config.name} deleted successfully"
+        return StandardResponse(
+            statusCode=200,
+            message=f"VM {vm_delete_config.name} deleted successfully",
+            data={}
         )
 
     except Exception as e:
         logger.error(f"Error deleting VM: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error deleting VM: {str(e)}",
+            data={}
+        )
 
-@app.post("/vm/status", response_model=VMStatus)
+@router.post("/vm/status", response_model=VMStatus)
 async def get_vm_status(vm_status_config: VMStatusConfig):
     try:
         logger.info(f"Getting status for VM: {vm_status_config.name}")
@@ -644,7 +677,11 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
         
         if status_result.returncode != 0:
             logger.error(f"Failed to get VM status: {status_result.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to get VM status")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to get VM status: {status_result.stderr}",
+            data={}
+        )
 
         # Parser la sortie JSON
         try:
@@ -657,13 +694,21 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
                 uptime=status_data.get("metrics", {}).get("uptime")
             )
         except json.JSONDecodeError:
-            raise HTTPException(status_code=500, detail="Invalid status response format")
+            return StandardResponse(
+            statusCode=500,
+            message="Invalid status response format",
+            data={}
+        )
 
     except Exception as e:
         logger.error(f"Error getting VM status: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error getting VM status: {str(e)}",
+            data={}
+        )
 
-@app.get("/vms", response_model=List[VMStatus])
+@router.get("/vms", response_model=StandardResponse)
 async def list_vms():
     try:
         logger.info("Listing all VMs")
@@ -677,26 +722,44 @@ async def list_vms():
         
         if list_result.returncode != 0:
             logger.error(f"Failed to list VMs: {list_result.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to list VMs")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to list VMs: {list_result.stderr}",
+            data={}
+        )
 
         # Parser la sortie JSON
         try:
             vms_data = json.loads(list_result.stdout)
-            return [
-                VMStatus(
-                    name=vm["name"],
-                    status=vm["status"]
-                )
-                for vm in vms_data
-            ]
+            return StandardResponse(
+            statusCode=200,
+            message="VMs listed successfully",
+            data={
+                "vms": [
+                    VMStatus(
+                        name=vm["name"],
+                        status=vm["status"]
+                    )
+                    for vm in vms_data
+                ]
+            }
+        )
         except json.JSONDecodeError:
-            raise HTTPException(status_code=500, detail="Invalid list response format")
+            return StandardResponse(
+            statusCode=500,
+            message="Invalid list response format",
+            data={}
+        )
 
     except Exception as e:
         logger.error(f"Error listing VMs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error listing VMs: {str(e)}",
+            data={}
+        )
 
-@app.get("/vm/{user_id}/{vm_name}/metrics")
+@router.get("/vm/{user_id}/{vm_name}/metrics")
 async def get_vm_metrics(user_id: str, vm_name: str):
     """
     Récupère les métriques d'une VM spécifique.
@@ -709,16 +772,18 @@ async def get_vm_metrics(user_id: str, vm_name: str):
         vm_dir = os.path.join("/opt/firecracker/vm", user_id, vm_name)
         pid_file = os.path.join('/opt/firecracker/logs', "firecracker-{user_id}_{vm_name}.pid")
         if not os.path.exists(vm_dir):
-            raise HTTPException(status_code=404, detail="VM not found")
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
             
         if not os.path.exists(socket_path):
-            return {
-                "success": True,
-                "data": {
-                    "vm_name": vm_name,
-                    "state": "stopped"
-                }
-            }
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
 
         # Vérifier si le processus est en cours d'exécution
         if os.path.exists(pid_file):
@@ -727,13 +792,11 @@ async def get_vm_metrics(user_id: str, vm_name: str):
                 try:
                     os.kill(int(pid), 0)  # Vérifie si le processus existe
                 except OSError:
-                    return {
-                        "success": True,
-                        "data": {
-                            "vm_name": vm_name,
-                            "state": "stopped"
-                        }
-                    }
+                    return StandardResponse(
+                    statusCode=404,
+                    message="VM not found",
+                    data={}
+                    )
 
         # Créer une instance de l'API Firecracker
         api = FirecrackerAPI(socket_path)
@@ -742,29 +805,34 @@ async def get_vm_metrics(user_id: str, vm_name: str):
         metrics = api.get_metrics()
         
         if "error" in metrics:
-            raise HTTPException(status_code=500, detail=f"Failed to get metrics: {metrics['error']}")
+            return StandardResponse(
+            statusCode=500,
+            message=f"Failed to get metrics: {metrics['error']}",
+            data={}
+        )
             
         # Formater la réponse
-        return {
-            "success": True,
-            "data": {
+        return StandardResponse(
+            statusCode=200,
+            message="VM metrics retrieved successfully",
+            data={
                 "vm_name": vm_name,
                 "state": "running",
                 "machine_config": metrics.get("machine_config", {}),
                 # "vm_state": metrics.get("state", {})
             }
-        }
+        )
         
     except HTTPException as he:
-        raise he
+        return StandardResponse(
+            statusCode=he.status_code,
+            message=he.detail,
+            data={}
+        )
     except Exception as e:
         logger.error(f"Error getting VM metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-if __name__ == "__main__":
-    import uvicorn
-    # Récupérer le port depuis les variables d'environnement
-    app_port = int(os.getenv('APP_PORT', 5003))
-    uvicorn.run(app, host="0.0.0.0", port=app_port)
+        return StandardResponse(
+            statusCode=500,
+            message=f"Error getting VM metrics: {str(e)}",
+            data={}
+        )

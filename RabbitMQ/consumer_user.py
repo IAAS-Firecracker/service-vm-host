@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import json
 import logging
 import threading
@@ -8,7 +9,11 @@ import pymysql
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-from models.model_vm_offers import VMOfferEntity
+from datetime import datetime
+
+# Import the SystemImage model
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models.model_user import UserEntity
 from database import Base,SessionLocal
 
 # Configure logging
@@ -18,17 +23,18 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-class RabbitMQConsumer:
+
+class UserConsumer:
     """
     A utility class to handle RabbitMQ connections and consuming messages
-    for the service-vm-host application.
+    for users in the service-vm-host application.
     """
     
     def __init__(self):
         """Initialize the RabbitMQ connection and channel."""
         self.connection = None
         self.channel = None
-        self.exchange_name = os.getenv('SERVICE_VM_OFFER_EXCHANGE', 'vm-offer-exchange')
+        self.exchange_name = os.getenv('SERVICE_USER_EXCHANGE', 'user-exchange')
         self.queue_name = f"{self.exchange_name}-vm-host-queue"
         self.host = os.getenv('RABBITMQ_HOST', 'localhost')
         self.port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -97,13 +103,13 @@ class RabbitMQConsumer:
             action = message.get('action')
             data = message.get('data')
             
-            logger.info(f"Received {action} event for VM offer: {data.get('id')}")
+            logger.info(f"Received {action} event for System Image: {data.get('id')}")
             
             # Process based on action
             if action == 'create' or action == 'update':
-                self.sync_vm_offer(data)
+                self.sync_user(data)
             elif action == 'delete':
-                self.delete_vm_offer(data.get('id'))
+                self.delete_user(data.get('id'))
             
             # Acknowledge the message
             ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -112,72 +118,66 @@ class RabbitMQConsumer:
             # Reject the message and requeue it
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
     
-    def sync_vm_offer(self, data):
+    def sync_user(self, data):
         """
-        Synchronize a VM offer with the local database.
+        Synchronize a user with the local database.
         
         Args:
-            data (dict): The VM offer data
+            data (dict): The user data
         """
         db = SessionLocal()
         try:
-            # Check if the VM offer already exists
-            vm_offer = db.query(VMOfferEntity).filter(VMOfferEntity.id == data.get('id')).first()
+            # Check if the user already exists
+            user = db.query(UserEntity).filter(UserEntity.id == data.get('id')).first()
             
-            if vm_offer:
-                # Update existing VM offer
-                vm_offer.name = data.get('name')
-                vm_offer.description = data.get('description')
-                vm_offer.cpu_count = data.get('cpu_count')
-                vm_offer.memory_size_mib = data.get('memory_size_mib')
-                vm_offer.disk_size_gb = data.get('disk_size_gb')
-                vm_offer.price_per_hour = data.get('price_per_hour')
-                vm_offer.is_active = data.get('is_active')
-                logger.info(f"Updated VM offer: {vm_offer.id}")
+            if user:
+                # Update existing user
+                user.name = data.get('name')
+                user.email = data.get('email')
+                user.role = data.get('role')
+                user.token = data.get('token')
+                logger.info(f"Updated User: {user.id}")
             else:
-                # Create new VM offer
-                vm_offer = VMOfferEntity(
+                # Create new user
+                user = UserEntity(
                     id=data.get('id'),
                     name=data.get('name'),
-                    description=data.get('description'),
-                    cpu_count=data.get('cpu_count'),
-                    memory_size_mib=data.get('memory_size_mib'),
-                    disk_size_gb=data.get('disk_size_gb'),
-                    price_per_hour=data.get('price_per_hour'),
-                    is_active=data.get('is_active')
+                    email=data.get('email'),
+                    role=data.get('role'),
+                    token=data.get('token')
                 )
-                db.add(vm_offer)
-                logger.info(f"Created VM offer: {vm_offer.id}")
+                db.add(user)
+                logger.info(f"Created User: {user.id}")
             
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Error syncing VM offer: {str(e)}")
+            logger.error(f"Error syncing User: {str(e)}")
         finally:
             db.close()
     
-    def delete_vm_offer(self, offer_id):
+    def delete_user(self, user_id):
         """
-        Delete a VM offer from the local database.
+        Delete a user from the local database.
         
         Args:
-            offer_id (int): The VM offer ID
+            user_id (int): The user ID
         """
         db = SessionLocal()
         try:
-            # Find the VM offer
-            vm_offer = db.query(VMOfferEntity).filter(VMOfferEntity.id == offer_id).first()
+            # Find the user
+            user = db.query(UserEntity).filter(UserEntity.id == user_id).first()
             
-            if vm_offer:
-                # Delete the VM offer
-                db.delete(vm_offer)
+            if user:
+                # Delete the user
+                db.delete(user)
                 db.commit()
-                logger.info(f"Deleted VM offer: {offer_id}")
+                logger.info(f"Deleted User: {user_id}")
             else:
-                logger.warning(f"VM offer not found for deletion: {offer_id}")
+                logger.warning(f"User not found for deletion: {user_id}")
         except Exception as e:
             db.rollback()
-            logger.error(f"Error deleting VM offer: {str(e)}")
+            logger.error(f"Error deleting User: {str(e)}")
         finally:
             db.close()
     
@@ -231,6 +231,4 @@ class RabbitMQConsumer:
             logger.error(f"Error stopping consumer: {str(e)}")
 
 # Create a singleton instance
-rabbitmq_consumer = RabbitMQConsumer()
-
-
+user_consumer = UserConsumer()

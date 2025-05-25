@@ -13,7 +13,8 @@ from datetime import datetime
 
 # Import the SystemImage model
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import SystemImage, Base
+from models.model_system_images import SystemImageEntity
+from database import Base,SessionLocal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,18 +23,6 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Configuration de la base de données
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
-MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_DATABASE = os.getenv("MYSQL_DB", "service_vm_host_db")
-
-DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
-
-# Configuration SQLAlchemy
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class SystemImageConsumer:
     """
@@ -139,7 +128,7 @@ class SystemImageConsumer:
         db = SessionLocal()
         try:
             # Check if the system image already exists
-            system_image = db.query(SystemImage).filter(SystemImage.id == data.get('id')).first()
+            system_image = db.query(SystemImageEntity).filter(SystemImageEntity.id == data.get('id')).first()
             
             if system_image:
                 # Update existing system image
@@ -151,7 +140,7 @@ class SystemImageConsumer:
                 logger.info(f"Updated System Image: {system_image.id}")
             else:
                 # Create new system image
-                system_image = SystemImage(
+                system_image = SystemImageEntity(
                     id=data.get('id'),
                     name=data.get('name'),
                     os_type=data.get('os_type'),
@@ -179,7 +168,7 @@ class SystemImageConsumer:
         db = SessionLocal()
         try:
             # Find the system image
-            system_image = db.query(SystemImage).filter(SystemImage.id == image_id).first()
+            system_image = db.query(SystemImageEntity).filter(SystemImageEntity.id == image_id).first()
             
             if system_image:
                 # Delete the system image

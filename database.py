@@ -1,17 +1,52 @@
 #!/usr/bin/env python3
 import os
-import sys
-import dotenv
-import pymysql
-import logging
 from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from dotenv import load_dotenv
+import logging
+import pymysql
+from models import *
+from dependencies import get_db, StandardResponse
+
+
+# Charger les variables d'environnement
+load_dotenv()
 
 # Configurer le logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Charger les variables d'environnement avant d'importer les autres modules
-dotenv.load_dotenv()
+# Configuration de la base de données
+MYSQL_USER = os.getenv('MYSQL_USER', 'root')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', 'root')
+MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
+MYSQL_PORT = os.getenv('MYSQL_PORT', '3306')
+MYSQL_DB = os.getenv('MYSQL_DB', 'service_vm_host_db')
+
+DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+
+# Créer le moteur SQLAlchemy
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def create_tables():
+    """Crée les tables dans la base de données"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tables créées avec succès")
+    except Exception as e:
+        logger.error(f"Erreur lors de la création des tables: {str(e)}")
+        raise
+
+# Fonction pour obtenir une session de base de données
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 # Fonction pour initialiser la base de données
@@ -44,19 +79,11 @@ def init_database():
         cursor.close()
         conn.close()
         
-        # Maintenant importer les modèles et créer les tables
-        from models import Base
+        # Maintenant importer l'application pour créer les tables
+        from app import create_tables
         
-        # Créer l'URL de connexion à la base de données
-        database_url = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db}"
-        
-        # Créer le moteur SQLAlchemy
-        engine = create_engine(database_url)
-        
-        # Créer toutes les tables définies dans les modèles
-        Base.metadata.create_all(engine)
-        
-        logger.info("Tables créées avec succès.")
+        # Utiliser la fonction create_tables définie dans app.py
+        create_tables()
         
         return True
         
@@ -64,11 +91,3 @@ def init_database():
         logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
         return False
 
-if __name__ == "__main__":
-    # Initialiser la base de données
-    if init_database():
-        logger.info("Base de données initialisée avec succès.")
-        sys.exit(0)
-    else:
-        logger.error("Échec de l'initialisation de la base de données.")
-        sys.exit(1)
