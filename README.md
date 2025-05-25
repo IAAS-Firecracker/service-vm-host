@@ -1,147 +1,150 @@
-# Service VM Host API
+# Service VM Host
 
-Une API Python pour gérer les machines virtuelles Firecracker dans le cadre du projet Tsore-Iaas-Firecracker.
+Service de gestion des machines virtuelles Firecracker dans un environnement microservices.
 
-## Fonctionnalités
+## Architecture
 
-- API RESTful complète pour gérer les machines virtuelles Firecracker
-- Documentation Swagger intégrée
-- Connexion à une base de données MySQL
-- Intégration avec RabbitMQ pour la messagerie asynchrone
-- Communication avec les autres services (service-cluster, service-system-image, service-vm-offer)
+Le service-vm-host fait partie d'un système microservices qui comprend :
+- Service VM Host (ce service)
+- Service VM Offer
+- Service System Image
+- Service Cluster
+- Service User
 
-## Structure de la base de données
+## Structure du Projet
 
-Table `vm_host` avec les champs suivants :
-- `id` : Identifiant unique
-- `name` : Nom de la machine virtuelle
-- `cpu_count` : Nombre de cœurs CPU
-- `memory_size_mib` : Taille de la mémoire RAM (en MiB)
-- `disk_size_gb` : Taille du disque (en GB)
-- `image_name` : Nom de l'image système utilisée
-- `ip_address` : Adresse IP de la VM
-- `mac_address` : Adresse MAC de la VM
-- `status` : Statut de la VM (running, stopped, etc.)
-- `created_at` : Date de création
-- `updated_at` : Date de dernière mise à jour
+```
+service-vm-host/
+├── app.py                # Point d'entrée de l'application
+├── config/              # Configuration et enregistrement Eureka
+├── database.py          # Configuration SQLAlchemy
+├── dependencies.py      # Dépendances FastAPI
+├── models/             # Modèles SQLAlchemy
+│   ├── model_user.py      # Modèle User
+│   ├── model_vm_offers.py # Modèle VM Offer
+│   ├── model_system_images.py # Modèle System Image
+│   └── model_virtual_machine.py # Modèle VM
+├── RabbitMQ/           # Consommateurs RabbitMQ
+│   ├── consumer_vm_offer.py
+│   ├── cosumer_system_image.py
+│   └── consumer_user.py
+├── routes/             # Routes FastAPI
+│   └── virtual_machine_routes.py
+├── utils/             # Utilitaires
+│   ├── utils_ssh.py
+│   └── utils_mac_adress.py
+├── logs/              # Logs de l'application
+└── ssh_keys_vm/       # Clés SSH pour les VMs
+```
 
 ## Installation
 
 1. Cloner le dépôt :
-```
+```bash
 git clone <repository-url>
-cd Tsore-Iaas-Firecracker/service-vm-host
+cd service-vm-host
 ```
 
-2. Créer un environnement virtuel et l'activer :
-```
-python -m venv venv
-source venv/bin/activate  # Sur Windows : venv\Scripts\activate
-```
-
-3. Installer les dépendances :
-```
+2. Installer les dépendances :
+```bash
 pip install -r requirements.txt
 ```
 
-4. Configurer la base de données :
-   - Créer une base de données MySQL nommée `service_vm_host_db`
-   - Modifier le fichier `.env` avec vos informations de connexion
+3. Configurer les variables d'environnement :
+   - Copier `.env.example` vers `.env`
+   - Configurer les variables suivantes dans `.env` :
+     - Base de données MySQL
+     - RabbitMQ
+     - Eureka Server
+     - Exchanges RabbitMQ (vm-offer-exchange, system-image-exchange, user-exchange)
 
-5. Initialiser la base de données :
-```
+4. Initialiser la base de données :
+```bash
 python db_init.py
 ```
 
 ## Utilisation
 
 1. Démarrer le serveur :
-```
-python main.py
+```bash
+python app.py
 ```
 
 2. Accéder à l'API :
-   - API : http://localhost:5003/api
-   - Documentation Swagger : http://localhost:5003/docs
+   - API : http://localhost:5003
+   - Documentation Swagger : http://localhost:5003/swagger
 
 ## Endpoints API
 
 ### Gestion des machines virtuelles
-- `POST /vm/create` : Crée une nouvelle machine virtuelle
-- `POST /vm/start/{vm_name}` : Démarre une machine virtuelle
-- `POST /vm/stop/{vm_name}` : Arrête une machine virtuelle
-- `DELETE /vm/delete/{vm_name}` : Supprime une machine virtuelle
-- `GET /vm/status/{vm_name}` : Obtient le statut d'une machine virtuelle
-- `GET /vm/list` : Liste toutes les machines virtuelles
+- `POST /api/service-vm-host/vm/create` : Crée une nouvelle machine virtuelle
+- `POST /api/service-vm-host/vm/start` : Démarre une machine virtuelle existante
+- `POST /api/service-vm-host/vm/stop` : Arrête une machine virtuelle
+- `POST /api/service-vm-host/vm/delete` : Supprime une machine virtuelle
+- `POST /api/service-vm-host/vm/status` : Obtient le statut d'une machine virtuelle
+- `GET /api/service-vm-host/vms` : Liste toutes les machines virtuelles
+- `GET /api/service-vm-host/vm/{user_id}/{vm_name}/metrics` : Obtient les métriques d'une VM
+
+### Health Check
+- `GET /health` : Vérifie la santé de l'application
+- `GET /info` : Informations sur l'application
 
 ### Exemple de requête pour créer une VM
 ```json
 {
     "name": "test-vm",
-    "cpu_count": 2,
-    "memory_size_mib": 1024,
-    "disk_size_gb": 5,
-    "image_name": "ubuntu-22.04.ext4",
-    "ssh_key": "optional-ssh-public-key"
+    "user_id": "1",
+    "vm_offer_id": "1",
+    "system_image_id": "1",
+    "tap_ip": "10.0.0.2",
+    "vm_mac": "02:00:00:00:00:01"
 }
 ```
 
-## Configuration .env docker
+## Communication Inter-Services
 
+Le service communique avec d'autres services via :
+1. RabbitMQ pour les événements :
+   - VM Offer Events
+   - System Image Events
+   - User Events
+
+2. Eureka pour la découverte de services
+
+## Sécurité
+
+- Utilisation de clés SSH pour l'authentification des VMs
+- Communication sécurisée via RabbitMQ
+- Validation des requêtes via FastAPI et Pydantic
+
+## Monitoring
+
+- Logs disponibles dans le dossier `logs/`
+- Métriques disponibles via l'endpoint `/metrics`
+- Health check via `/health` et `/info`
+
+## Déploiement
+
+Le service peut être déployé via Docker :
+```bash
+docker build -t service-vm-host .
+docker-compose up
 ```
-SECRET_KEY=your_secret_key_here
 
-#Database configuration
-MYSQL_HOST=mysql_db_service_vm_host
-MYSQL_PORT=3306
-MYSQL_USER=firecracker
-MYSQL_PASSWORD=firecracker
-MYSQL_DB=service_vm_host_db
-APP_PORT=5003
-APP_NAME=service-vm-host
+## Configuration des Permissions Firecracker
 
-#Rabbit configuration
-RABBITMQ_HOST=rabbitmq
-RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
+Les permissions nécessaires pour Firecracker sont définies dans `firecracker-sudoers`.
 
-#URL
-EUREKA_SERVER=http://service-registry:8761/eureka/
-SERVICE_CLUSTER_HOST=http://service-cluster:5003
-SERVICE_CONFIG_URI=http://service-config:8080
+## Dépendances
 
-#All Exchange
-SERVICE_VM_OFFER_EXCHANGE=vm-offer-exchange
-SERVICE_SYSTEM_IMAGE_EXCHANGE=system-image-exchange
-```
+Les principales dépendances sont :
+- FastAPI >= 0.104.1
+- SQLAlchemy >= 2.0.23
+- Pydantic >= 2.4.2
+- RabbitMQ (via pika)
+- Eureka Client
+- MySQL (via PyMySQL)
 
-## Configuration .env local
+## License
 
-```
-SECRET_KEY=your_secret_key_here
-
-#Database configuration
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=root
-MYSQL_PASSWORD=root
-MYSQL_DB=service_vm_host_db
-APP_PORT=5003
-APP_NAME=service-vm-host
-
-#Rabbit configuration
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
-
-#URL
-EUREKA_SERVER=http://localhost:8761/eureka/
-SERVICE_CLUSTER_HOST=http://localhost:5003
-SERVICE_CONFIG_URI=http://localhost:8080
-
-#All Exchange
-SERVICE_VM_OFFER_EXCHANGE=vm-offer-exchange
-SERVICE_SYSTEM_IMAGE_EXCHANGE=system-image-exchange
-```
+Ce service est sous licence MIT.
