@@ -131,6 +131,37 @@ docker build -t service-vm-host .
 docker-compose up
 ```
 
+En Local
+```bash
+#Service VM Host
+SECRET_KEY=4b4017b60ba6766fa68ac34cda732625aceb1248483b363507c62a76aeb0fb3d5df4fbec77ebb94c409294ff1597ac093cee490e1e842674ab3c989a2162b1104214f0c802fe1d3ca8cbc823b162fc6fd986c53147a0a5b23467238feb9ff9c0f92135dbee5710550466a1013b20abd96496f61c1b44d74e9b3438c8fefa89cd
+
+#Database configuration
+MYSQL_HOST=localhost
+MYSQL_PORT=13319
+MYSQL_USER=firecracker
+MYSQL_PASSWORD=firecracker
+MYSQL_DB=service_vm_host_db
+APP_PORT=5003
+APP_NAME=service-vm-host
+
+#Rabbit configuration
+RABBITMQ_HOST=localhost
+RABBITMQ_PORT=5672
+RABBITMQ_USER=guest
+RABBITMQ_PASSWORD=guest
+
+#URL
+EUREKA_SERVER=http://localhost:8761/eureka/
+SERVICE_CLUSTER_HOST=http://localhost:5000
+SERVICE_CONFIG_URI=http://localhost:8080
+
+#All Exchange
+SERVICE_VM_OFFER_EXCHANGE=vm-offer-exchange
+SERVICE_SYSTEM_IMAGE_EXCHANGE=system-image-exchange
+SERVICE_USER_EXCHANGE=user-exchange
+```
+
 ## Configuration des Permissions Firecracker
 
 Les permissions nécessaires pour Firecracker sont définies dans `firecracker-sudoers`.
