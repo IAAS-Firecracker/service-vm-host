@@ -177,12 +177,12 @@ check_curl_response "$response" "Configuring balloon" ${LINENO} "$LOG_PATH" || {
 echo "$(date '+%Y-%m-%d %H:%M:%S,%3N') - setting_vm_image.sh - INFO - Configured balloon" >> "$LOG_PATH"
 
 # Configurer le réseau dans l'image
-MOUNT_DIR="/mnt"
+MOUNT_DIR="/mnt/vm_${VM_NAME}"
 sudo mkdir -p "$MOUNT_DIR"
 sudo mount -o loop "$CUSTOM_VM" "$MOUNT_DIR"
 
-mkdir -p "$MOUNT_DIR/etc/netplan"
-cat > "$MOUNT_DIR/etc/netplan/01-netcfg.yaml" << EOF
+# Créer le fichier de configuration réseau
+cat > /tmp/01-netcfg.yaml << EOF
 network:
   version: 2
   renderer: networkd
@@ -193,16 +193,48 @@ network:
         - to: default
           via: ${TAP_IP}
       nameservers:
-        addresses: [8.8.8.8]
+        addresses: [8.8.8.8, 1.1.1.1]
       dhcp4: false
+      dhcp6: false
+      optional: false
 EOF
 
+# Copier la configuration réseau dans l'image
+sudo mkdir -p "$MOUNT_DIR/etc/netplan"
+sudo cp /tmp/01-netcfg.yaml "$MOUNT_DIR/etc/netplan/"
+
+# Configurer le fichier resolv.conf
+cat > /tmp/resolv.conf << EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+
+sudo cp /tmp/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
+
+# Configurer le hostname
+echo "${VM_NAME}" | sudo tee "$MOUNT_DIR/etc/hostname"
+
+# Configurer le fichier hosts
+echo -e "127.0.0.1\tlocalhost\n${VM_IP%/*}\t${VM_NAME}" | sudo tee "$MOUNT_DIR/etc/hosts"
+
+# Activer le démarrage automatique de l'interface réseau
+sudo chroot "$MOUNT_DIR" /bin/bash -c "systemctl enable systemd-networkd"
+sudo chroot "$MOUNT_DIR" /bin/bash -c "systemctl enable systemd-resolved"
+
+# Désactiver le service cloud-init s'il existe
+if [ -f "$MOUNT_DIR/etc/cloud/cloud.cfg" ]; then
+    sudo sed -i 's/^network: {config: disabled}/network: {config: true}/' "$MOUNT_DIR/etc/cloud/cloud.cfg"
+fi
+
 # Appliquer la configuration réseau
-chroot "$MOUNT_DIR" netplan generate
-chroot "$MOUNT_DIR" netplan apply
+echo "Applying network configuration..."
+sudo chroot "$MOUNT_DIR" netplan generate
+sudo chroot "$MOUNT_DIR" netplan apply
 
+# Nettoyer et démonter
+sync
 echo "$(date '+%Y-%m-%d %H:%M:%S,%3N') - setting_vm_image.sh - INFO - Configured network settings in guest OS" >> "$LOG_PATH"
-
-sudo umount "$MOUNT_DIR"
+sudo umount -l "$MOUNT_DIR"
+sudo rmdir "$MOUNT_DIR"
 
 echo "VM configuration completed successfully"
