@@ -8,7 +8,7 @@ async def register_with_eureka():
     try:
         eureka_url = os.getenv('EUREKA_SERVER', 'http://localhost:8761/eureka/')
         app_name = os.getenv('APP_NAME', 'service-vm-host')
-        app_port = int(os.getenv('APP_PORT', '5002'))
+        app_port = int(os.getenv('APP_PORT', '5003'))
         
         
         import socket
@@ -40,8 +40,8 @@ async def register_with_eureka():
                 "zone": "primary",
                 "securePortEnabled": "false",
                 "securePort": "443",
-                "statusPageUrl": f"http://{app_host}:{app_port}/info",
-                "healthCheckUrl": f"http://{app_host}:{app_port}/health"
+                "statusPageUrl": f"http://{app_host}:{app_port}/api/service-vm-host/info",
+                "healthCheckUrl": f"http://{app_host}:{app_port}/api/service-vm-host/health"
             }
         )
         print(f"Enregistrement auprès d'Eureka réussi")
