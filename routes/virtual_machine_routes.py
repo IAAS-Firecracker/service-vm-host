@@ -285,6 +285,8 @@ async def read_root():
 @router.post("/vm/create", response_model=StandardResponse)
 async def create_vm(vm_config: VirtualMachineCreate, background_tasks: BackgroundTasks):
     try:
+        logger.info(f"Creating VM: {vm_config.name} for user: {vm_config.user_id}")
+        
         # Générer une paire de clés SSH
         ssh_key_pair = generate_ssh_key_pair()
         vm_config.ssh_public_key = ssh_key_pair['public_key']
@@ -310,7 +312,7 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
         if not vm_config.root_password:
             vm_config.root_password = "FirecrackerVM@2024"  # Mot de passe par défaut si non fourni
 
-        # Enregistrer la VM dans la base de données
+        # Enregistrer la VM dans la base de données 
         db = SessionLocal()
         try:
             # Créer un nouvel enregistrement de VM
@@ -318,7 +320,11 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
             # Vérifier si la VM existe déjà
             existing_vm = db.query(VirtualMachine).filter_by(user_id=int(vm_config.user_id), name=vm_config.name).first()
             if existing_vm:
-                raise HTTPException(status_code=400, detail="VM already exists")
+                return StandardResponse(
+                    statusCode=400,
+                    message="VM already exists: " + vm_config.name,
+                    data={}
+                )
             
             virtual_machine = VirtualMachine(
                 user_id=int(vm_config.user_id),
@@ -346,17 +352,35 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
             # Récupérer l'ID de la VM
             vm_id = virtual_machine.id
             logger.info(f"VM record saved with ID: {vm_id}")
+            
+            # Configurer les paramètres réseau de la VM
+            vm_config.tap_device = f"tap{vm_id}"
+            vm_config.vm_ip = generate_ip_from_sequence(vm_id)
+            vm_config.tap_ip = generate_tap_ip_from_sequence(vm_id)
+            vm_config.vm_mac = generate_mac_address(vm_config.vm_ip)
+            
+            # Mettre à jour la VM avec les nouvelles informations réseau
+            logger.info(f"Updating VM with tap_device_name: {vm_config.tap_device}")
+            logger.info(f"Updating VM with tap IP: {vm_config.tap_ip}")
+            logger.info(f"Updating VM with ip_address: {vm_config.vm_ip}")
+            logger.info(f"Updating VM with mac_address: {vm_config.vm_mac}")
+            
+            virtual_machine.tap_device_name = vm_config.tap_device
+            virtual_machine.ip_address = vm_config.vm_ip
+            virtual_machine.tap_ip = vm_config.tap_ip
+            virtual_machine.mac_address = vm_config.vm_mac
+            db.commit()
+            db.refresh(virtual_machine)
         except Exception as e:
             db.rollback()
             logger.error(f"Error saving VM to database: {str(e)}")
-            # Ne pas lever d'exception ici pour ne pas interrompre le processus si l'enregistrement échoue
+            return StandardResponse(
+                statusCode=500,
+                message="Failed to save VM configuration: " + str(e),
+                data={}
+            )
         finally:
             db.close()
-
-        vm_config.tap_device = f"tap{vm_id}"
-        vm_config.vm_ip = generate_ip_from_sequence(vm_id)
-        vm_config.tap_ip = generate_tap_ip_from_sequence(vm_id)
-        vm_config.vm_mac = generate_mac_address(vm_id)
             
         
 
@@ -378,7 +402,11 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
         # Créer le dossier de la VM
         vm_path = f"/opt/firecracker/vm/{vm_config.user_id}/{vm_config.name}"
         if os.path.exists(vm_path):
-            raise HTTPException(status_code=400, detail="VM already exists")
+            return StandardResponse(
+                statusCode=400,
+                message="VM already exists firecracker: " + vm_config.name,
+                data={}
+            )
 
         os.makedirs(vm_path, exist_ok=True)
 
@@ -400,7 +428,11 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
             )
             if prepare_result.returncode != 0:
                 logger.error(f"Failed to prepare custom vm: {prepare_result.stderr}")
-                raise HTTPException(status_code=500, detail="Failed to prepare custom vm")
+                return StandardResponse(
+                    statusCode=500,
+                    message="Failed to prepare custom vm: " + prepare_result.stderr,
+                    data={}
+                )
 
 
         #Setup VM
@@ -446,7 +478,11 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
             )
         if setting_up_vm.returncode != 0:
             logger.error(f"Failed to setting custom vm: {setting_up_vm.stderr}")
-            raise HTTPException(status_code=500, detail="Failed to setting custom vm")        
+            return StandardResponse(
+                statusCode=500,
+                message="Failed to setting custom vm: " + setting_up_vm.stderr,
+                data={}
+            )        
         
         # Mettre à jour les informations de la VM dans la base de données
         db = SessionLocal()
@@ -505,8 +541,24 @@ async def start_vm(vm_start_config: VMStartConfig):
     Démarre une VM existante.
     """
     try:
+        #check user_id and vm_id
+        logger.info(f"Check vm of user in database")
+        db = SessionLocal()
+        vm = db.query(VirtualMachine).filter_by(
+            user_id=vm_start_config.user_id,
+            id=vm_start_config.vm_id
+        ).first()
+        if not vm:
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
+
+
         # Vérifier si la VM existe
-        vm_dir = os.path.join("/opt/firecracker/vm", vm_start_config.user_id, str(vm_start_config.name))
+        logger.info(f"Check vm of user in file")
+        vm_dir = os.path.join("/opt/firecracker/vm", str(vm.user_id), str(vm.name))
         if not os.path.exists(vm_dir):
             return StandardResponse(
             statusCode=404,
@@ -515,6 +567,8 @@ async def start_vm(vm_start_config: VMStartConfig):
         )
 
         # Déterminer le type d'OS
+        logger.info(f"Check OStype")
+
         os_type = None
         for file in os.listdir(vm_dir):
             if file.endswith(".ext4"):
@@ -533,29 +587,30 @@ async def start_vm(vm_start_config: VMStartConfig):
         os.makedirs(socket_dir, exist_ok=True)
         os.chmod(socket_dir, 0o777)  # Donner les permissions nécessaires
 
-        socket_path = f"{socket_dir}/{vm_start_config.user_id}_{vm_start_config.name}.socket"
+        socket_path = f"{socket_dir}/{vm.user_id}_{vm.name}.socket"
         
         # Supprimer l'ancien socket s'il existe
         if os.path.exists(socket_path):
             os.unlink(socket_path)
 
         # Démarrer le processus Firecracker
-        start_firecracker_process(vm_start_config.user_id, vm_start_config.name, socket_path)
+        logger.info(f"Starting Firecracker Process")
+        start_firecracker_process(str(vm.user_id), vm.name, socket_path)
 
         # Démarrer la VM
-        logger.info(f"Starting VM {str(vm_start_config.name)}")
+        logger.info(f"Starting VM {str(vm.name)}")
         start_result = subprocess.run(
             ["./script_sh/start_vm.sh",
-             vm_start_config.user_id,
-             str(vm_start_config.name),
-             str(vm_start_config.os_type),
-             str(vm_start_config.cpu_count),
-             str(vm_start_config.memory_size_mib),
-             str(vm_start_config.disk_size_gb),
-             str(vm_start_config.tap_device),
-             str(vm_start_config.tap_ip),
-             str(vm_start_config.vm_ip),
-             str(vm_start_config.vm_mac)
+             str(vm.user_id),
+             str(vm.name),
+             str(os_type),
+             str(vm.vcpu_count),
+             str(vm.memory_size_mib),
+             str(vm.disk_size_gb),
+             str(vm.tap_device_name),
+             str(vm.tap_ip),
+             str(vm.ip_address),
+             str(vm.mac_address)
             ],
             capture_output=True,
             text=True
@@ -571,7 +626,7 @@ async def start_vm(vm_start_config: VMStartConfig):
 
         return StandardResponse(
             statusCode=200,
-            message=f"VM {vm_start_config.name} started successfully",
+            message=f"VM {vm.name} started successfully",
             data={
                 # "pid": 0,
                 # "ssh_key_id": ssh_key_id,
@@ -596,11 +651,24 @@ async def start_vm(vm_start_config: VMStartConfig):
 @router.post("/vm/stop", response_model=StandardResponse)
 async def stop_vm(vm_stop_config: VMStopConfig):
     try:
-        logger.info(f"Stopping VM: {vm_stop_config.name}")
+        logger.info(f"Stopping VM: {vm_stop_config.vm_id}")
+        
+        #check user_id and vm_id
+        db = SessionLocal()
+        vm = db.query(VirtualMachine).filter_by(
+            user_id=vm_stop_config.user_id,
+            id=vm_stop_config.vm_id
+        ).first()
+        if not vm:
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
         
         # Arrêter la VM
         stop_result = subprocess.run(
-            ["./script_sh/stop_vm.sh", vm_stop_config.user_id, vm_stop_config.name,vm_stop_config.tap_device],
+            ["./script_sh/stop_vm.sh", str(vm.user_id), vm.name,vm.tap_device_name],
             capture_output=True,
             text=True
         )
@@ -613,10 +681,10 @@ async def stop_vm(vm_stop_config: VMStopConfig):
             data={}
         )
 
-        logger.info(f"VM {vm_stop_config.name} stopped successfully")
+        logger.info(f"VM {vm.name} stopped successfully")
         return StandardResponse(
             statusCode=200,
-            message=f"VM {vm_stop_config.name} stopped successfully",
+            message=f"VM {vm.name} stopped successfully",
             data={}
         )
 
@@ -631,11 +699,24 @@ async def stop_vm(vm_stop_config: VMStopConfig):
 @router.post("/vm/delete", response_model=StandardResponse)
 async def delete_vm(vm_delete_config: VMDeleteConfig):
     try:
-        logger.info(f"Deleting VM: {vm_delete_config.name}")
+        logger.info(f"Deleting VM: {vm_delete_config.vm_id}")
+        
+        #check user_id and vm_id
+        db = SessionLocal()
+        vm = db.query(VirtualMachine).filter_by(
+            user_id=vm_delete_config.user_id,
+            id=vm_delete_config.vm_id
+        ).first()
+        if not vm:
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
         
         # Supprimer la VM
         delete_result = subprocess.run(
-            ["./script_sh/delete_vm.sh", vm_delete_config.user_id, vm_delete_config.name, vm_delete_config.tap_device],
+            ["./script_sh/delete_vm.sh", str(vm.user_id), vm.name, vm.tap_device_name],
             capture_output=True,
             text=True
         )
@@ -648,10 +729,10 @@ async def delete_vm(vm_delete_config: VMDeleteConfig):
             data={}
         )
 
-        logger.info(f"VM {vm_delete_config.name} deleted successfully")
+        logger.info(f"VM {vm.name} deleted successfully")
         return StandardResponse(
             statusCode=200,
-            message=f"VM {vm_delete_config.name} deleted successfully",
+            message=f"VM {vm.name} deleted successfully",
             data={}
         )
 
@@ -666,11 +747,24 @@ async def delete_vm(vm_delete_config: VMDeleteConfig):
 @router.post("/vm/status", response_model=VMStatus)
 async def get_vm_status(vm_status_config: VMStatusConfig):
     try:
-        logger.info(f"Getting status for VM: {vm_status_config.name}")
+        logger.info(f"Getting status for VM: {vm_status_config.vm_id}")
+        
+        #check user_id and vm_id
+        db = SessionLocal()
+        vm = db.query(VirtualMachine).filter_by(
+            user_id=vm_status_config.user_id,
+            id=vm_status_config.vm_id
+        ).first()
+        if not vm:
+            return StandardResponse(
+            statusCode=404,
+            message="VM not found",
+            data={}
+        )
         
         # Obtenir le statut de la VM
         status_result = subprocess.run(
-            ["./script_sh/status_vm.sh", vm_status_config.user_id, vm_status_config.name],
+            ["./script_sh/status_vm.sh", str(vm.user_id), vm.name],
             capture_output=True,
             text=True
         )
@@ -687,7 +781,7 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
         try:
             status_data = json.loads(status_result.stdout)
             return VMStatus(
-                name=vm_status_config.name,
+                name=vm.name,
                 status=status_data["status"],
                 cpu_usage=status_data.get("metrics", {}).get("cpu_usage"),
                 memory_usage=status_data.get("metrics", {}).get("memory_usage"),

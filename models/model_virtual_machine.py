@@ -131,30 +131,20 @@ class VirtualMachineBase(BaseModel):
     system_image_id: int
 
 class VMStartConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    cpu_count: int
-    os_type: str
-    memory_size_mib: int
-    disk_size_gb: int
-    vm_mac: str
-    tap_device: Optional[str] = "tap0"
-    tap_ip: Optional[str] = "172.16.0.1"
-    vm_ip: Optional[str] = "172.16.0.2"
+    user_id: str  
+    vm_id: int
 
 class VMStopConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    tap_device: Optional[str] = "tap0"
+    user_id: str  
+    vm_id: int
 
 class VMDeleteConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
-    tap_device: Optional[str] = "tap0"
+    user_id: str  
+    vm_id: int
 
 class VMStatusConfig(BaseModel):
-    name: str
-    user_id: str  # Identifiant unique de l'utilisateur
+    user_id: str  
+    vm_id: int
 
 class VMStatus(BaseModel):
     name: str

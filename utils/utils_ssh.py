@@ -7,7 +7,7 @@ import time
 import logging
 from pathlib import Path
 from fastapi import HTTPException
-from models.model_ssh_key import SSHKeyCreate
+from models.model_ssh_key import SSHKey
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -172,8 +172,8 @@ def save_ssh_key_to_db(db, user_id, ssh_key_pair):
 
     
     try:
-        # Créer un nouvel enregistrement de clé SSH
-        ssh_key = SSHKeyCreate(
+        # Créer un nouvel enregistrement de clé SSH en utilisant le modèle SQLAlchemy
+        ssh_key = SSHKey(
             user_id=int(user_id),
             name=ssh_key_pair['key_name'],
             public_key=ssh_key_pair['public_key'],

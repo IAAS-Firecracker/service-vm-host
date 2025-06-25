@@ -79,9 +79,6 @@ def init_database():
         cursor.close()
         conn.close()
         
-        # Maintenant importer l'application pour créer les tables
-        from app import create_tables
-        
         # Utiliser la fonction create_tables définie dans app.py
         create_tables()
         
