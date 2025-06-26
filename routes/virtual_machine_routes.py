@@ -845,11 +845,12 @@ def get_user_vms(user_id: int, db: Session = Depends(get_db)):
     try:
         user_vms = db.query(VirtualMachine).filter(VirtualMachine.user_id == user_id).all()
         if user_vms:
+            user_vms_list = [vm.to_dict() for vm in user_vms]
             return StandardResponse(
                 statusCode=200,
                 message="User VMs found",
                 data={
-                    "vms": user_vms
+                    "vms": user_vms_list
                 }
             )
         else:
@@ -859,9 +860,10 @@ def get_user_vms(user_id: int, db: Session = Depends(get_db)):
                 data={}
             )
     except Exception as e:
+        logger.error(f"Internal error: {str(e)}")
         return StandardResponse(
             statusCode=500,
-            message=str(e),
+            message="Internal error",
             data={}
         )
 
