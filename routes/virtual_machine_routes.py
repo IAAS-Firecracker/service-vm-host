@@ -810,13 +810,6 @@ async def list_vms(db: Session = Depends(get_db)):
         logger.info("Listing all VMs")
         
         # Obtenir la liste des VMs
-        # list_result = subprocess.run(
-        #     ["./script_sh/list_vms.sh"],
-        #     capture_output=True,
-        #     text=True
-        # )
-
-        # TODO: Get list of VMs from database
         list_result = db.query(VirtualMachine).all() 
         
         if list_result is None:
@@ -827,20 +820,15 @@ async def list_vms(db: Session = Depends(get_db)):
             data={}
         )
 
-        # Parser la sortie JSON
-        try:
-            return StandardResponse(
-                statusCode=200,
-                message="VMs listed successfully",
-                data={
-                    "vms": list_result
-                }
-        )
-        except json.JSONDecodeError:
-            return StandardResponse(
-            statusCode=500,
-            message="Invalid list response format",
-            data={}
+        # Convertir chaque VirtualMachine en dictionnaire
+        vms_list = [vm.to_dict() for vm in list_result]
+
+        return StandardResponse(
+            statusCode=200,
+            message="VMs listed successfully",
+            data={
+                "vms": vms_list
+            }
         )
 
     except Exception as e:
