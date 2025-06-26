@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter,Depends, HTTPException, BackgroundTasks
 from models.model_virtual_machine import VirtualMachine, VirtualMachineCreate, VMStartConfig, VMStopConfig, VMDeleteConfig, VMStatusConfig, VMStatus
 from models.model_ssh_key import SSHKey
 from models.model_vm_offers import VMOfferEntity
@@ -15,11 +15,13 @@ from logging import getLogger
 from utils.utils_ssh import generate_ssh_key_pair, save_ssh_key_to_db
 from utils.utils_mac_adress import generate_ip_from_sequence, generate_tap_ip_from_sequence, generate_mac_address
 from dotenv import load_dotenv
-from dependencies import StandardResponse
+from dependencies import get_db,StandardResponse
 import platform
 import psutil
 import uuid
 import requests
+import logging
+
 
 
 logger = getLogger(__name__)
@@ -803,40 +805,36 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
         )
 
 @router.get("/vms", response_model=StandardResponse)
-async def list_vms():
+async def list_vms(db: Session = Depends(get_db)):
     try:
         logger.info("Listing all VMs")
         
         # Obtenir la liste des VMs
-        list_result = subprocess.run(
-            ["./script_sh/list_vms.sh"],
-            capture_output=True,
-            text=True
-        )
+        # list_result = subprocess.run(
+        #     ["./script_sh/list_vms.sh"],
+        #     capture_output=True,
+        #     text=True
+        # )
+
+        # TODO: Get list of VMs from database
+        list_result = db.query(VirtualMachine).all() 
         
-        if list_result.returncode != 0:
-            logger.error(f"Failed to list VMs: {list_result.stderr}")
+        if list_result is None:
+            logger.error(f"Failed to list VMs: {list_result}")
             return StandardResponse(
             statusCode=500,
-            message=f"Failed to list VMs: {list_result.stderr}",
+            message=f"Failed to list VMs: {list_result}",
             data={}
         )
 
         # Parser la sortie JSON
         try:
-            vms_data = json.loads(list_result.stdout)
             return StandardResponse(
-            statusCode=200,
-            message="VMs listed successfully",
-            data={
-                "vms": [
-                    VMStatus(
-                        name=vm["name"],
-                        status=vm["status"]
-                    )
-                    for vm in vms_data
-                ]
-            }
+                statusCode=200,
+                message="VMs listed successfully",
+                data={
+                    "vms": list_result
+                }
         )
         except json.JSONDecodeError:
             return StandardResponse(
@@ -850,6 +848,32 @@ async def list_vms():
         return StandardResponse(
             statusCode=500,
             message=f"Error listing VMs: {str(e)}",
+            data={}
+        )
+
+#get user vms
+@router.get("/user/{user_id}", response_model=StandardResponse)
+def get_user_vms(user_id: int, db: Session = Depends(get_db)):
+    try:
+        user_vms = db.query(VirtualMachine).filter(VirtualMachine.user_id == user_id).all()
+        if user_vms:
+            return StandardResponse(
+                statusCode=200,
+                message="User VMs found",
+                data={
+                    "vms": user_vms
+                }
+            )
+        else:
+            return StandardResponse(
+                statusCode=404,
+                message="User VMs not found",
+                data={}
+            )
+    except Exception as e:
+        return StandardResponse(
+            statusCode=500,
+            message=str(e),
             data={}
         )
 
