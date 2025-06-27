@@ -626,6 +626,10 @@ async def start_vm(vm_start_config: VMStartConfig):
             data={}
         )
 
+        # Mettre à jour le statut de la VM
+        vm.status = "running"
+        db.commit() 
+
         return StandardResponse(
             statusCode=200,
             message=f"VM {vm.name} started successfully",
@@ -683,6 +687,10 @@ async def stop_vm(vm_stop_config: VMStopConfig):
             data={}
         )
 
+        # Mettre à jour le statut de la VM
+        vm.status = "stopped"
+        db.commit() 
+
         logger.info(f"VM {vm.name} stopped successfully")
         return StandardResponse(
             statusCode=200,
@@ -730,6 +738,11 @@ async def delete_vm(vm_delete_config: VMDeleteConfig):
             message=f"Failed to delete VM: {delete_result.stderr}",
             data={}
         )
+
+        #supprimer la vm de la base de données
+        db.delete(vm)
+        db.commit() 
+        db.close()
 
         logger.info(f"VM {vm.name} deleted successfully")
         return StandardResponse(
@@ -782,12 +795,18 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
         # Parser la sortie JSON
         try:
             status_data = json.loads(status_result.stdout)
-            return VMStatus(
-                name=vm.name,
-                status=status_data["status"],
-                cpu_usage=status_data.get("metrics", {}).get("cpu_usage"),
-                memory_usage=status_data.get("metrics", {}).get("memory_usage"),
-                uptime=status_data.get("metrics", {}).get("uptime")
+            return StandardResponse(
+                statusCode=200,
+                message="VM status retrieved successfully",
+                data={
+                    "status": VMStatus(
+                        name=vm.name,
+                        status=status_data["status"],
+                        cpu_usage=status_data.get("metrics", {}).get("cpu_usage"),
+                        memory_usage=status_data.get("metrics", {}).get("memory_usage"),
+                        uptime=status_data.get("metrics", {}).get("uptime")
+                    )
+                }
             )
         except json.JSONDecodeError:
             return StandardResponse(

@@ -32,14 +32,15 @@ if [ -S "${SOCKET_PATH}" ]; then
         pid=$(cat "$pid_file")
         if ps -p "$pid" > /dev/null; then
             # Obtenir la configuration de la machine
-            machine_config=$(curl --unix-socket "${SOCKET_PATH}" -s \
+            # Ajouter un timeout et vérifier le contenu
+            machine_config=$(curl --unix-socket "${SOCKET_PATH}" -s --max-time 5 \
               -X GET 'http://localhost/machine-config' \
               -H 'Accept: application/json')
-            
-            
-            if [ $? -eq 0 ]; then
+
+            if [ $? -eq 0 ] && [ -n "$machine_config" ] && echo "$machine_config" | jq . >/dev/null 2>&1; then
                 echo "{\"status\": \"running\", \"machine_config\": ${machine_config}}"
-                exit 0
+            else
+                echo "{\"status\": \"error\", \"message\": \"Failed to get VM status\"}"
             fi
         fi
     fi
