@@ -1,4 +1,4 @@
-from fastapi import APIRouter,Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter,Depends, HTTPException, BackgroundTasks,WebSocketDisconnect,WebSocket
 from models.model_virtual_machine import VirtualMachine, VirtualMachineCreate, VMStartConfig, VMStopConfig, VMDeleteConfig, VMStatusConfig, VMStatus
 from models.model_ssh_key import SSHKey
 from models.model_vm_offers import VMOfferEntity
@@ -22,6 +22,20 @@ import uuid
 import requests
 import logging
 import sys
+
+import asyncio
+import websockets
+import json
+import pty
+import select
+import termios
+import struct
+import fcntl
+import subprocess
+import time
+import threading
+from typing import Dict, Optional
+from pydantic import BaseModel
 
 
 
@@ -1057,3 +1071,263 @@ async def get_vm_metrics(user_id: str, vm_name: str):
             message=f"Error getting VM metrics: {str(e)}",
             data={}
         )
+
+
+class SSHConnectRequest(BaseModel):
+    vm_id: str
+    username: str = "root"
+
+class SSHInputRequest(BaseModel):
+    terminal_id: str
+    input: str
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.terminal_connections: Dict[str, str] = {}  # terminal_id -> websocket_id
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+        # Clean up terminal connections
+        terminals_to_remove = [tid for tid, cid in self.terminal_connections.items() if cid == client_id]
+        for terminal_id in terminals_to_remove:
+            del self.terminal_connections[terminal_id]
+            ssh_terminal_manager.cleanup_terminal(terminal_id)
+
+    async def send_personal_message(self, message: dict, client_id: str):
+        if client_id in self.active_connections:
+            websocket = self.active_connections[client_id]
+            try:
+                await websocket.send_text(json.dumps(message))
+            except:
+                # Connection closed, clean up
+                self.disconnect(client_id)
+
+    async def broadcast_to_terminal(self, message: dict, terminal_id: str):
+        if terminal_id in self.terminal_connections:
+            client_id = self.terminal_connections[terminal_id]
+            await self.send_personal_message(message, client_id)
+
+manager = ConnectionManager()
+
+class SSHTerminalEndpoint:
+    def __init__(self, vm_manager=None):
+        self.vm_manager = vm_manager
+        self.terminals = {}
+    
+    def create_ssh_terminal(self, vm_id: str, username: str = 'root') -> str:
+        """Create an interactive SSH terminal session"""
+        # For demo purposes, we'll assume vm_manager exists
+        # In real implementation, replace this with actual VM lookup
+        vm_info = self.get_vm_info(vm_id)
+        if not vm_info:
+            raise ValueError("VM not found")
+        
+        # Create SSH command
+        ssh_cmd = [
+            'ssh',
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            f'{username}@{vm_info["ip"]}'
+        ]
+        
+        # Create PTY
+        master_fd, slave_fd = pty.openpty()
+        
+        # Start SSH process
+        process = subprocess.Popen(
+            ssh_cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            preexec_fn=os.setsid
+        )
+        
+        terminal_id = f"{vm_id}_{username}_{int(time.time())}"
+        self.terminals[terminal_id] = {
+            'process': process,
+            'master_fd': master_fd,
+            'slave_fd': slave_fd,
+            'vm_id': vm_id,
+            'username': username
+        }
+        
+        return terminal_id
+    
+    def get_vm_info(self, vm_id: str) -> Optional[dict]:
+        """Mock VM info - replace with actual VM manager implementation"""
+        # This is a mock implementation
+        mock_vms = {
+            "vm1": {"ip": "192.168.1.100", "status": "running"},
+            "vm2": {"ip": "192.168.1.101", "status": "running"},
+        }
+        return mock_vms.get(vm_id)
+    
+    def cleanup_terminal(self, terminal_id: str):
+        """Clean up terminal resources"""
+        if terminal_id in self.terminals:
+            terminal = self.terminals[terminal_id]
+            try:
+                terminal['process'].terminate()
+                os.close(terminal['master_fd'])
+                os.close(terminal['slave_fd'])
+            except:
+                pass
+            del self.terminals[terminal_id]
+    
+    def write_to_terminal(self, terminal_id: str, data: str):
+        """Write data to terminal"""
+        if terminal_id in self.terminals:
+            terminal = self.terminals[terminal_id]
+            try:
+                os.write(terminal['master_fd'], data.encode())
+            except OSError:
+                self.cleanup_terminal(terminal_id)
+    
+    async def start_terminal_session(self, terminal_id: str):
+        """Start reading from terminal and emit output"""
+        if terminal_id not in self.terminals:
+            return
+            
+        terminal = self.terminals[terminal_id]
+        master_fd = terminal['master_fd']
+        
+        def read_terminal():
+            while terminal['process'].poll() is None:
+                try:
+                    ready, _, _ = select.select([master_fd], [], [], 1)
+                    if ready:
+                        output = os.read(master_fd, 1024).decode('utf-8', errors='ignore')
+                        # Use asyncio to send the message
+                        asyncio.create_task(manager.broadcast_to_terminal({
+                            'type': 'ssh_output',
+                            'terminal_id': terminal_id,
+                            'output': output
+                        }, terminal_id))
+                except OSError:
+                    break
+            
+            # Cleanup when process ends
+            asyncio.create_task(manager.broadcast_to_terminal({
+                'type': 'ssh_disconnected',
+                'terminal_id': terminal_id
+            }, terminal_id))
+            self.cleanup_terminal(terminal_id)
+        
+        # Run in thread to avoid blocking
+        thread = threading.Thread(target=read_terminal)
+        thread.daemon = True
+        thread.start()
+
+ssh_terminal_manager = SSHTerminalEndpoint()
+
+
+@router.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket, client_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            if message.get('type') == 'ssh_connect':
+                await handle_ssh_connect(message, client_id)
+            elif message.get('type') == 'ssh_input':
+                await handle_ssh_input(message, client_id)
+            elif message.get('type') == 'ssh_disconnect':
+                await handle_ssh_disconnect(message, client_id)
+                
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+
+async def handle_ssh_connect(data: dict, client_id: str):
+    vm_id = data.get('vm_id')
+    username = data.get('username', 'root')
+    
+    try:
+        terminal_id = ssh_terminal_manager.create_ssh_terminal(vm_id, username)
+        
+        # Associate terminal with client
+        manager.terminal_connections[terminal_id] = client_id
+        
+        # Start terminal session
+        await ssh_terminal_manager.start_terminal_session(terminal_id)
+        
+        await manager.send_personal_message({
+            'type': 'ssh_connected',
+            'terminal_id': terminal_id,
+            'status': 'connected'
+        }, client_id)
+        
+    except Exception as e:
+        await manager.send_personal_message({
+            'type': 'ssh_error',
+            'error': str(e)
+        }, client_id)
+
+async def handle_ssh_input(data: dict, client_id: str):
+    terminal_id = data.get('terminal_id')
+    input_data = data.get('input')
+    
+    if terminal_id and input_data:
+        ssh_terminal_manager.write_to_terminal(terminal_id, input_data)
+
+async def handle_ssh_disconnect(data: dict, client_id: str):
+    terminal_id = data.get('terminal_id')
+    if terminal_id:
+        ssh_terminal_manager.cleanup_terminal(terminal_id)
+        if terminal_id in manager.terminal_connections:
+            del manager.terminal_connections[terminal_id]
+
+# REST API endpoints
+@router.post("/ssh/connect")
+async def create_ssh_connection(request: SSHConnectRequest):
+    """Create SSH terminal connection (REST endpoint)"""
+    try:
+        terminal_id = ssh_terminal_manager.create_ssh_terminal(request.vm_id, request.username)
+        return {
+            "terminal_id": terminal_id,
+            "status": "created",
+            "vm_id": request.vm_id,
+            "username": request.username
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/ssh/{terminal_id}")
+async def disconnect_ssh_terminal(terminal_id: str):
+    """Disconnect SSH terminal"""
+    ssh_terminal_manager.cleanup_terminal(terminal_id)
+    return {"status": "disconnected", "terminal_id": terminal_id}
+
+@router.get("/ssh/{terminal_id}/status")
+async def get_terminal_status(terminal_id: str):
+    """Get terminal status"""
+    if terminal_id in ssh_terminal_manager.terminals:
+        terminal = ssh_terminal_manager.terminals[terminal_id]
+        return {
+            "terminal_id": terminal_id,
+            "status": "active" if terminal['process'].poll() is None else "inactive",
+            "vm_id": terminal['vm_id'],
+            "username": terminal['username']
+        }
+    else:
+        raise HTTPException(status_code=404, detail="Terminal not found")
+
+@router.get("/terminals")
+async def list_terminals():
+    """List all active terminals"""
+    terminals = []
+    for terminal_id, terminal in ssh_terminal_manager.terminals.items():
+        terminals.append({
+            "terminal_id": terminal_id,
+            "vm_id": terminal['vm_id'],
+            "username": terminal['username'],
+            "status": "active" if terminal['process'].poll() is None else "inactive"
+        })
+    return {"terminals": terminals}
