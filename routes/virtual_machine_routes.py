@@ -21,6 +21,7 @@ import psutil
 import uuid
 import requests
 import logging
+import sys
 
 
 
@@ -540,37 +541,58 @@ async def create_vm(vm_config: VirtualMachineCreate, background_tasks: Backgroun
 @router.post("/vm/start", response_model=StandardResponse)
 async def start_vm(vm_start_config: VMStartConfig):
     """
-    Démarre une VM existante.
+    Démarre une VM existante qui a déjà été créée et configurée.
+    Cette fonction se contente de démarrer la VM sans refaire la configuration.
     """
     try:
-        #check user_id and vm_id
-        logger.info(f"Check vm of user in database")
+        logger.info(f"Starting VM for user {vm_start_config.user_id}, VM ID: {vm_start_config.vm_id}")
+        
+        # Récupérer les informations de la VM depuis la base de données
         db = SessionLocal()
-        vm = db.query(VirtualMachine).filter_by(
-            user_id=vm_start_config.user_id,
-            id=vm_start_config.vm_id
-        ).first()
-        if not vm:
-            return StandardResponse(
-            statusCode=404,
-            message="VM not found",
-            data={}
-        )
+        try:
+            vm = db.query(VirtualMachine).filter_by(
+                user_id=vm_start_config.user_id,
+                id=vm_start_config.vm_id
+            ).first()
+            
+            if not vm:
+                return StandardResponse(
+                    statusCode=404,
+                    message="VM not found in database",
+                    data={}
+                )
+            
+            # Vérifier que la VM a été correctement créée et configurée
+            if not all([vm.tap_device_name, vm.ip_address, vm.tap_ip, vm.mac_address]):
+                return StandardResponse(
+                    statusCode=400,
+                    message="VM is not properly configured. Please recreate the VM.",
+                    data={}
+                )
+            
+            # Vérifier si la VM est déjà en cours d'exécution
+            if vm.status == "running":
+                return StandardResponse(
+                    statusCode=200,
+                    message=f"VM {vm.name} is already running",
+                    data={
+                        "vm_ip": vm.ip_address,
+                        "ssh_port": vm.ssh_port or 22
+                    }
+                )
+        finally:
+            db.close()
 
-
-        # Vérifier si la VM existe
-        logger.info(f"Check vm of user in file")
+        # Vérifier l'existence du répertoire de la VM
         vm_dir = os.path.join("/opt/firecracker/vm", str(vm.user_id), str(vm.name))
         if not os.path.exists(vm_dir):
             return StandardResponse(
-            statusCode=404,
-            message="VM not found",
-            data={}
-        )
+                statusCode=404,
+                message="VM files not found. Please recreate the VM.",
+                data={}
+            )
 
-        # Déterminer le type d'OS
-        logger.info(f"Check OStype")
-
+        # Déterminer le type d'OS à partir des fichiers existants
         os_type = None
         for file in os.listdir(vm_dir):
             if file.endswith(".ext4"):
@@ -579,28 +601,31 @@ async def start_vm(vm_start_config: VMStartConfig):
 
         if os_type is None:
             return StandardResponse(
-            statusCode=404,
-            message="OS type not found",
-            data={}
-        )
+                statusCode=404,
+                message="VM disk image not found. Please recreate the VM.",
+                data={}
+            )
 
-        # Définir le chemin du socket unique pour cette VM
+        # Définir le chemin du socket (réutiliser la logique existante)
         socket_dir = "/tmp/firecracker-sockets"
-        os.makedirs(socket_dir, exist_ok=True)
-        os.chmod(socket_dir, 0o777)  # Donner les permissions nécessaires
-
         socket_path = f"{socket_dir}/{vm.user_id}_{vm.name}.socket"
         
-        # Supprimer l'ancien socket s'il existe
-        if os.path.exists(socket_path):
-            os.unlink(socket_path)
+        # Vérifier si Firecracker est déjà en cours d'exécution
+        firecracker_running = os.path.exists(socket_path)
+        
+        if not firecracker_running:
+            # Créer le répertoire des sockets si nécessaire
+            os.makedirs(socket_dir, exist_ok=True)
+            os.chmod(socket_dir, 0o777)
+            
+            # Démarrer le processus Firecracker seulement s'il n'est pas déjà en cours
+            logger.info(f"Starting Firecracker process for VM {vm.name}")
+            start_firecracker_process(str(vm.user_id), vm.name, socket_path)
+        else:
+            logger.info(f"Firecracker process already running for VM {vm.name}")
 
-        # Démarrer le processus Firecracker
-        logger.info(f"Starting Firecracker Process")
-        start_firecracker_process(str(vm.user_id), vm.name, socket_path)
-
-        # Démarrer la VM
-        logger.info(f"Starting VM {str(vm.name)}")
+        # Démarrer la VM en utilisant les paramètres déjà configurés
+        logger.info(f"Starting VM {vm.name} with existing configuration")
         start_result = subprocess.run(
             ["./script_sh/start_vm.sh",
              str(vm.user_id),
@@ -621,31 +646,44 @@ async def start_vm(vm_start_config: VMStartConfig):
         if start_result.returncode != 0:
             logger.error(f"Failed to start VM: {start_result.stderr}")
             return StandardResponse(
-            statusCode=500,
-            message=f"Failed to start VM: {start_result.stderr}",
-            data={}
-        )
+                statusCode=500,
+                message=f"Failed to start VM: {start_result.stderr}",
+                data={}
+            )
 
-        # Mettre à jour le statut de la VM
-        vm.status = "running"
-        db.commit() 
+        # Mettre à jour le statut de la VM en base de données
+        db = SessionLocal()
+        try:
+            vm = db.query(VirtualMachine).filter_by(
+                user_id=vm_start_config.user_id,
+                id=vm_start_config.vm_id
+            ).first()
+            
+            if vm:
+                vm.status = "running"
+                db.commit()
+                logger.info(f"VM {vm.name} status updated to running")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error updating VM status: {str(e)}")
+        finally:
+            db.close()
 
+        # Retourner les informations d'accès distant
         return StandardResponse(
             statusCode=200,
-            message=f"VM {vm.name} started successfully",
+            message=f"VM {vm.name} started successfully and ready for remote access",
             data={
-                # "pid": 0,
-                # "ssh_key_id": ssh_key_id,
-                # "private_key": ssh_key_pair['private_key']
+                "vm_ip": vm.ip_address,
+                "ssh_port": vm.ssh_port or 22,
+                "status": "running",
+                "remote_access_info": {
+                    "ssh_command": f"ssh root@{vm.ip_address}",
+                    "note": "Use the private key provided during VM creation"
+                }
             }
         )
 
-    except HTTPException as he:
-        return StandardResponse(
-            statusCode=he.status_code,
-            message=he.detail,
-            data={}
-        )
     except Exception as e:
         logger.error(f"Error starting VM: {str(e)}")
         return StandardResponse(
@@ -759,7 +797,7 @@ async def delete_vm(vm_delete_config: VMDeleteConfig):
             data={}
         )
 
-@router.post("/vm/status", response_model=VMStatus)
+@router.post("/vm/status", response_model=StandardResponse)
 async def get_vm_status(vm_status_config: VMStatusConfig):
     try:
         logger.info(f"Getting status for VM: {vm_status_config.vm_id}")
@@ -775,7 +813,7 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
             statusCode=404,
             message="VM not found",
             data={}
-        )
+            )
         
         # Obtenir le statut de la VM
         status_result = subprocess.run(
@@ -783,6 +821,8 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
             capture_output=True,
             text=True
         )
+
+        logger.info(f"VM status: {status_result.stdout}")
         
         if status_result.returncode != 0:
             logger.error(f"Failed to get VM status: {status_result.stderr}")
@@ -790,31 +830,85 @@ async def get_vm_status(vm_status_config: VMStatusConfig):
             statusCode=500,
             message=f"Failed to get VM status: {status_result.stderr}",
             data={}
-        )
+            )
 
         # Parser la sortie JSON
         try:
-            status_data = json.loads(status_result.stdout)
-            return StandardResponse(
-                statusCode=200,
-                message="VM status retrieved successfully",
-                data={
-                    "status": VMStatus(
-                        name=vm.name,
-                        status=status_data["status"],
-                        cpu_usage=status_data.get("metrics", {}).get("cpu_usage"),
-                        memory_usage=status_data.get("metrics", {}).get("memory_usage"),
-                        uptime=status_data.get("metrics", {}).get("uptime")
-                    )
+            status_output = status_result.stdout.strip()
+            logger.info(f"VM status raw output: {repr(status_output)}")
+            
+            # Gérer le cas où la sortie contient plusieurs lignes
+            # Chercher la ligne qui contient du JSON valide
+            status_data = None
+            for line in status_output.split('\n'):
+                line = line.strip()
+                if line and line.startswith('{') and line.endswith('}'):
+                    try:
+                        status_data = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+            
+            if status_data is None:
+                # Essayer de parser la sortie complète comme JSON
+                status_data = json.loads(status_output)
+            
+            vm_status = status_data["status"]
+            
+            # Cas spéciaux selon le statut
+            if vm_status == "not_found":
+                return StandardResponse(
+                    statusCode=404,
+                    message="VM not found in filesystem",
+                    data={}
+                )
+            elif vm_status == "error":
+                return StandardResponse(
+                    statusCode=500,
+                    message=status_data.get("message", "VM status error"),
+                    data={}
+                )
+            else:
+                # Pour les statuts "running", "stopped", etc.
+                # Extraire les informations de machine_config si disponibles
+                machine_config = status_data.get("machine_config", {})
+                
+                # Créer l'objet VMStatus avec les données disponibles
+                vm_status_obj = VMStatus(
+                    name=vm.name,
+                    status=vm_status,
+                    cpu_usage=None,  # Pas de métriques temps réel disponibles
+                    memory_usage=None,  # Pas de métriques temps réel disponibles
+                    uptime=None  # Pas de métriques temps réel disponibles
+                )
+                
+                # Préparer les données de réponse
+                response_data = {
+                    "status": vm_status_obj
                 }
-            )
-        except json.JSONDecodeError:
+                
+                # Ajouter machine_config si disponible (pour les VMs running)
+                if machine_config:
+                    response_data["machine_config"] = {
+                        "vcpu_count": machine_config.get("vcpu_count"),
+                        "mem_size_mib": machine_config.get("mem_size_mib"),
+                        "smt": machine_config.get("smt"),
+                        "track_dirty_pages": machine_config.get("track_dirty_pages")
+                    }
+                
+                return StandardResponse(
+                    statusCode=200,
+                    message="VM status retrieved successfully",
+                    data=response_data
+                )
+        except Exception as e:
+            logger.error(f"Error parsing VM status: {str(e)}")
             return StandardResponse(
-            statusCode=500,
-            message="Invalid status response format",
-            data={}
-        )
-
+                statusCode=500,
+                message="Invalid status response format " + str(e)+"\nLine :"+str(sys.exc_info()[2].tb_lineno),
+                data={}
+            )
+        
     except Exception as e:
         logger.error(f"Error getting VM status: {str(e)}")
         return StandardResponse(

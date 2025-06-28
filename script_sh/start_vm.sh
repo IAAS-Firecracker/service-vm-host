@@ -80,6 +80,13 @@ sudo iptables -t nat -D POSTROUTING -o "$HOST_IFACE" -j MASQUERADE || true
 sudo iptables -t nat -A POSTROUTING -o "$HOST_IFACE" -j MASQUERADE
 sudo iptables -A FORWARD -i "$TAP_DEVICE" -o "$HOST_IFACE" -j ACCEPT
 sudo iptables -A FORWARD -o "$TAP_DEVICE" -i "$HOST_IFACE" -j ACCEPT
+
+# Option : Port forwarding pour accès SSH depuis le LAN
+# Décommenter les lignes suivantes si vous voulez l'accès SSH depuis le LAN
+SSH_PORT=$((2200 + ${VM_IP##*.}))  # Port SSH unique basé sur l'IP de la VM
+sudo iptables -t nat -A PREROUTING -i "$HOST_IFACE" -p tcp --dport "$SSH_PORT" -j DNAT --to-destination "${VM_IP}:22"
+echo "SSH access from LAN: ssh root@$(hostname -I | awk '{print $1}') -p $SSH_PORT"
+
 sudo sh -c "iptables-save > /etc/iptables/rules.v4"
 
 # Interface réseau FC
