@@ -26,7 +26,7 @@ CUSTOM_VM="${VM_DIR}/${OS_TYPE}.ext4"
 
 MASK_SHORT="/30"
 FC_MAC="${VM_MAC}"
-IFACE_ID="eth0"
+IFACE_ID="enp0s31f6"
 
 # Vérification de l'existence
 if [ ! -d "${VM_DIR}" ]; then
